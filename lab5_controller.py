@@ -1,9 +1,8 @@
-"""lab5 controller."""
 from controller import Robot, Motor, Camera, RangeFinder, Lidar, Keyboard
 import math
 import numpy as np
 from matplotlib import pyplot as plt
-from scipy.signal import convolve2d # Uncomment if you want to use something else for finding the configuration space
+from scipy.signal import convolve2d
 
 MAX_SPEED = 7.0  # [rad/s]
 MAX_SPEED_MS = 0.633 # [m/s]
@@ -19,18 +18,13 @@ LIDAR_ANGLE_RANGE = math.radians(240)
 
 ##### vvv [Begin] Do Not Modify vvv #####
 
-# create the Robot instance.
 robot = Robot()
-# get the time step of the current world.
 timestep = int(robot.getBasicTimeStep())
 
-# The Tiago robot has multiple motors, each identified by their names below
 part_names = ("head_2_joint", "head_1_joint", "torso_lift_joint", "arm_1_joint",
               "arm_2_joint",  "arm_3_joint",  "arm_4_joint",      "arm_5_joint",
               "arm_6_joint",  "arm_7_joint",  "wheel_left_joint", "wheel_right_joint")
 
-# All motors except the wheels are controlled by position control. The wheels
-# are controlled by a velocity controller. We therefore set their position to infinite.
 target_pos = (0.0, 0.0, 0.09, 0.07, 1.02, -3.16, 1.27, 1.32, 0.0, 1.41, 'inf', 'inf')
 robot_parts=[]
 
@@ -39,11 +33,8 @@ for i in range(N_PARTS):
     robot_parts[i].setPosition(float(target_pos[i]))
     robot_parts[i].setVelocity(robot_parts[i].getMaxVelocity() / 2.0)
 
-# The Tiago robot has a couple more sensors than the e-Puck
-# Some of them are mentioned below. We will use its LiDAR for Lab 5
-
-range = robot.getDevice('range-finder')
-range.enable(timestep)
+range_finder = robot.getDevice('range-finder')
+range_finder.enable(timestep)
 camera = robot.getDevice('camera')
 camera.enable(timestep)
 camera.recognitionEnable(timestep)
@@ -51,18 +42,14 @@ lidar = robot.getDevice('Hokuyo URG-04LX-UG01')
 lidar.enable(timestep)
 lidar.enablePointCloud()
 
-# We are using a GPS and compass to disentangle mapping and localization
 gps = robot.getDevice("gps")
 gps.enable(timestep)
 compass = robot.getDevice("compass")
 compass.enable(timestep)
 
-# We are using a keyboard to remote control the robot
 keyboard = robot.getKeyboard()
 keyboard.enable(timestep)
 
-# The display is used to display the map. We are using 360x360 pixels to
-# map the 12x12m2 apartment
 display = robot.getDevice("display")
 
 # Odometry
@@ -90,20 +77,21 @@ mode = 'planner'
 
 
 ###################
-#
 # Planner
-#
 ###################
 if mode == 'planner':
     # Part 2.3: Provide start and end in world coordinate frame and convert it to map's frame
-    start_w = None # (Pose_X, Pose_Y) in meters
-    end_w = None # (Pose_X, Pose_Y) in meters
+    start_w = (-8.46, -4.88) # (Pose_X, Pose_Y) in meters
+    end_w = (-6, -10.2) # (Pose_X, Pose_Y) in meters
 
     # Convert the start_w and end_w from the webots coordinate frame into the map frame
-    start = None # (x, y) in 360x360 map
-    end = None # (x, y) in 360x360 map
-
+    start =  (146, 254) # (x, y) in 360x360 map
+    end = (306, 180) # (x, y) in 360x360 map
+    
     # Part 2.3: Implement A* or Dijkstra's Algorithm to find a path
+    def heuristic(a, b):
+        return math.sqrt((a[0] - b[0])**2 + (a[1] - b[1])**2)
+
     def path_planner(map, start, end):
         '''
         :param map: A 2D numpy array of size 360x360 representing the world's cspace with 0 as free space and 1 as obstacle
@@ -111,19 +99,88 @@ if mode == 'planner':
         :param end: A tuple of indices representing the end cell in the map
         :return: A list of tuples as a path from the given start to the given end in the given maze
         '''
-        pass
+        rows, cols = map.shape
+        open_set = [(heuristic(start, end), start)]  # Use a list for the open set
+        came_from = {}
+        g_score = {start: 0}
+        f_score = {start: heuristic(start, end)}
+
+        while open_set:
+            # Get the node with the lowest f_score
+            open_set.sort()  # Sort to simulate a priority queue
+            _, current = open_set.pop(0)
+
+            if current == end:
+                path = []
+                while current in came_from:
+                    path.append(current)
+                    current = came_from[current]
+                path.append(start)
+                return path[::-1]  # Reverse the path to start-to-end
+
+        # Explore neighbors
+            for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                neighbor = (current[0] + dx, current[1] + dy)
+                if 0 <= neighbor[0] < rows and 0 <= neighbor[1] < cols and map[neighbor[0], neighbor[1]] == 0:
+                    tentative_g_score = g_score[current] + 1
+                    if neighbor not in g_score or tentative_g_score < g_score[neighbor]:
+                        came_from[neighbor] = current
+                        g_score[neighbor] = tentative_g_score
+                        f_score[neighbor] = tentative_g_score + heuristic(neighbor, end)
+                        open_set.append((f_score[neighbor], neighbor))
+    
+        return []
 
     # Part 2.1: Load map (map.npy) from disk and visualize it
+    map = np.load('map.npy')
+    map = np.rot90(map, k=-1)
+    map = np.fliplr(map)
+    
 
+    plt.imshow(map, cmap='gray')
+    # plt.title("Map Visualization (Flipped)")
+    # plt.show()
 
     # Part 2.2: Compute an approximation of the “configuration space”
+    kernel = np.ones((10,10))  # Quadratic kernel of ones
+    config_space = convolve2d(map, kernel, mode='same', boundary='fill', fillvalue=0)
+    config_space = np.clip(config_space, 0, 1)  # Ensure binary values (0 or 1)
+
+    # Visualize configuration space
+    plt.imshow(config_space, cmap='gray')
+    plt.title("Configuration Space")
 
 
+    # plt.show()
     # Part 2.3 continuation: Call path_planner
+    start_map = (150, 112)  # Example starting point
+    end_map = (288, 320)  # Example ending point
+
+    # Plan the path
+    path = path_planner(config_space, start_map, end_map)
+
+    if path:
+        # Convert map coordinates to world coordinates
+        waypoints = [((-x[1] / 360) * 12, (-x[0] / 360) * 12) for x in path]
+
+        # Save path to disk
+        np.save('path.npy', waypoints)
+
+        # Visualize path
+        for coord in path:
+            config_space[coord[0], coord[1]] = 0.5  # Mark path
+        plt.imshow(config_space, cmap='magma')
+        plt.title("Path Visualization")
+        plt.show()
+        # plt.show()  # Comment this out before submitting
+        print('here')
+    else:
+        print("No path found.")
 
 
     # Part 2.4: Turn paths into waypoints and save on disk as path.npy and visualize it
-    waypoints = []
+    # done above
+# waypoints = []
 
 ######################
 #
@@ -135,6 +192,7 @@ if mode == 'planner':
 
 # Initialize your map data structure here as a 2D floating point array
 map = np.zeros(shape=[360,360])
+inc = 5e-3
 waypoints = []
 
 if mode == 'autonomous':
@@ -195,15 +253,22 @@ while robot.step(timestep) != -1 and mode != 'planner':
             wy = 11.999
         if rho < LIDAR_SENSOR_MAX_RANGE:
             # Part 1.3: visualize map gray values.
- 
-            # You will eventually REPLACE the following lines with a more robust version of the map
-            # with a grayscale drawing containing more levels than just 0 and 1.
-            display.setColor(int(0X0000FF))
-            display.drawPixel(360-abs(int(wx*30)),abs(int(wy*30)))
+            coordX=360-abs(int(wx*30))
+            coordY=abs(int(wy*30))
+            if coordX<360 and coordY<360:
+                map[coordX][coordY]=min(1,map[coordX][coordY]+inc)
+                g=map[coordX][coordY]
+                #color=int((g*256**2+g*256+g)*255)
+                shade=int(g*255)
+                color=(shade<<16)|(shade<<8)|shade# I think this is what you meant to do
+                display.setColor(color)
+                display.drawPixel(coordX,coordY)
 
     # Draw the robot's current pose on the 360x360 display
     display.setColor(int(0xFF0000))
     display.drawPixel(360-abs(int(pose_x*30)), abs(int(pose_y*30)))
+    threshold_map=map>0.5
+
 
     ###################
     #
@@ -230,11 +295,19 @@ while robot.step(timestep) != -1 and mode != 'planner':
             vR = 0
         elif key == ord('S'):
             # Part 1.4: Filter map and save to filesystem
+            # new_map = map>.5
+            # new_map = np.multiply(new_map, 1)
+            new_map = (map > 0.5).astype(int)
 
+            np.save('map.npy', new_map) 
+            
             print("Map file saved")
         elif key == ord('L'):
             # You will not use this portion in Part 1 but here's an example for loading saved a numpy array
             map = np.load("map.npy")
+            plt.imshow(map, cmap='gray')
+            plt.show()
+            
             print("Map loaded")
         else: # slow down
             vL *= 0.75
