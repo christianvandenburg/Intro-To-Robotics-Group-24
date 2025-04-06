@@ -70,8 +70,8 @@ lidar_offsets = lidar_offsets[83:len(lidar_offsets)-83] # Only keep lidar readin
 ##################### IMPORTANT #####################
 # Set the mode here. Please change to 'autonomous' before submission
 # mode = 'manual' # Part 1.1: manual mode
-mode = 'planner'
-# mode = 'autonomous'
+# mode = 'planner'
+mode = 'autonomous'
 # mode = 'picknplace'
 
 
@@ -195,11 +195,61 @@ map = np.zeros(shape=[360,360])
 inc = 5e-3
 waypoints = []
 
-if mode == 'autonomous':
+# if mode == 'autonomous':
     # Part 3.1: Load path from disk and visualize it
-    waypoints = [] # Replace with code to load your path
+    # waypoints = np.load('path.npy') # Replace with code to load your path
+    # plt.figure()
+    # plt.plot(waypoints[:, 0], waypoints[:, 1], 'o-', label="Path")
+    # plt.xlabel("X")
+    # plt.ylabel("Y")
+    # plt.title("Waypoints")
+    # plt.legend()
+    # plt.show()
 
-state = 0 # use this to iterate through your path
+    
+    # index = 0
+    # while( index != len(waypoints) - 1 ):
+        # xr = gps.getValues()[0]
+        # yr = gps.getValues()[1]
+        # theta = np.atan2(compass.getValues()[0], compass.getValues()[1])
+        
+        # distance = np.sqrt(((xr-waypoints[index][0])*(xr-waypoints[index][0]))+((yr-waypoints[index][1])*(yr-waypoints[index][1])))
+        # bearing = np.atan2((waypoints[index][1]-yr),(waypoints[index][0]-xr))-theta
+        # if index+2 <= len(waypoints):
+            # heading = np.atan2((waypoints[index+1][1]-yr),(waypoints[index+1][0]-xr))-theta
+        
+        # if distance > .05:
+            # if bearing > .2:
+                # print('turning left')
+                # rightMotor.setVelocity(MAX_SPEED)
+                # leftMotor.setVelocity(-MAX_SPEED)
+            # elif bearing < -.2:
+                # print('turning right')
+                # rightMotor.setVelocity(-MAX_SPEED)
+                # leftMotor.setVelocity(MAX_SPEED)
+            # elif distance > 0:
+                # print('forward')
+                # rightMotor.setVelocity(MAX_SPEED)
+                # leftMotor.setVelocity(MAX_SPEED)
+        # else:
+            # print('here')
+            # if heading > .2:
+                # print('adjusting left')
+                # rightMotor.setVelocity(MAX_SPEED)
+                # leftMotor.setVelocity(-MAX_SPEED)
+            # elif heading < -.2:
+                # print('adjusting right')
+                # rightMotor.setVelocity(-MAX_SPEED)
+                # leftMotor.setVelocity(MAX_SPEED)
+            # if heading < .2 and heading > -.2:
+                # if index+2 > len(waypoints):
+                    # print('done')
+                    # index = 0
+                # else:    
+                    # print('next')
+                    # index+=1
+
+# state = 0 # use this to iterate through your path
 
 if mode == 'picknplace':
     # Part 4: Use the function calls from lab5_joints using the comments provided there
@@ -312,7 +362,59 @@ while robot.step(timestep) != -1 and mode != 'planner':
         else: # slow down
             vL *= 0.75
             vR *= 0.75
-    else: # not manual mode
+    elif mode == 'autonomous': # not manual mode
+        print('started')
+        if not any(waypoints):
+            waypoints = np.load('path.npy') # Replace with code to load your path
+            length = len(waypoints) - 1
+            plt.figure()
+            plt.plot(waypoints[:, 0], waypoints[:, 1], 'o-', label="Path")
+            plt.xlabel("X")
+            plt.ylabel("Y")
+            plt.title("Waypoints")
+            plt.legend()
+            plt.show()
+            index = 0
+        if( index != length):
+            xr = gps.getValues()[0]
+            yr = gps.getValues()[1]
+            theta = np.atan2(compass.getValues()[0], compass.getValues()[1])
+            
+            distance = np.sqrt(((xr-waypoints[index][0])*(xr-waypoints[index][0]))+((yr-waypoints[index][1])*(yr-waypoints[index][1])))
+            bearing = np.atan2((waypoints[index][1]-yr),(waypoints[index][0]-xr))-theta
+            if index+1 <= length:
+                heading = np.atan2((waypoints[index+1][1]-yr),(waypoints[index+1][0]-xr))-theta
+            
+            if distance > .05:
+                if bearing > .2:
+                    print('turning left')
+                    vR = MAX_SPEED
+                    vL = -MAX_SPEED
+                elif bearing < -.2:
+                    print('turning right')
+                    vR = -MAX_SPEED
+                    vL = MAX_SPEED
+                elif distance > 0:
+                    print('forward')
+                    vR = MAX_SPEED
+                    vL = MAX_SPEED
+            else:
+                print('here')
+                if heading > .2:
+                    print('adjusting left')
+                    vR = MAX_SPEED
+                    vL = -MAX_SPEED
+                elif heading < -.2:
+                    print('adjusting right')
+                    vR = -MAX_SPEED
+                    vL = MAX_SPEED
+                if heading < .2 and heading > -.2:
+                    if index+1 > length:
+                        print('done')
+                        # index = 0
+                    else:    
+                        print('next')
+                        index+=1
         # Part 3.2: Feedback controller
         #STEP 1: Calculate the error
         rho = 0
