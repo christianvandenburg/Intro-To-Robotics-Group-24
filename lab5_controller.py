@@ -195,16 +195,17 @@ map = np.zeros(shape=[360,360])
 inc = 5e-3
 waypoints = []
 
-# if mode == 'autonomous':
+if mode == 'autonomous':
     # Part 3.1: Load path from disk and visualize it
-    # waypoints = np.load('path.npy') # Replace with code to load your path
-    # plt.figure()
-    # plt.plot(waypoints[:, 0], waypoints[:, 1], 'o-', label="Path")
-    # plt.xlabel("X")
-    # plt.ylabel("Y")
-    # plt.title("Waypoints")
-    # plt.legend()
-    # plt.show()
+    waypoints = np.load('path.npy') # Replace with code to load your path
+    plt.figure()
+    plt.plot(waypoints[:, 0], waypoints[:, 1], 'o-', label="Path")
+    plt.xlabel("X")
+    plt.ylabel("Y")
+    plt.title("Waypoints")
+    plt.legend()
+    plt.show()
+    index = 0
 
     
     # index = 0
@@ -363,18 +364,8 @@ while robot.step(timestep) != -1 and mode != 'planner':
             vL *= 0.75
             vR *= 0.75
     elif mode == 'autonomous': # not manual mode
-        print('started')
-        if not any(waypoints):
-            waypoints = np.load('path.npy') # Replace with code to load your path
-            length = len(waypoints) - 1
-            plt.figure()
-            plt.plot(waypoints[:, 0], waypoints[:, 1], 'o-', label="Path")
-            plt.xlabel("X")
-            plt.ylabel("Y")
-            plt.title("Waypoints")
-            plt.legend()
-            plt.show()
-            index = 0
+        length = len(waypoints) - 1
+        print('started', flush = True)
         if( index != length):
             xr = gps.getValues()[0]
             yr = gps.getValues()[1]
