@@ -70,8 +70,8 @@ lidar_offsets = lidar_offsets[83:len(lidar_offsets)-83] # Only keep lidar readin
 ##################### IMPORTANT #####################
 # Set the mode here. Please change to 'autonomous' before submission
 # mode = 'manual' # Part 1.1: manual mode
-# mode = 'planner'
-mode = 'autonomous'
+mode = 'planner'
+# mode = 'autonomous'
 # mode = 'picknplace'
 
 
@@ -81,8 +81,10 @@ mode = 'autonomous'
 ###################
 if mode == 'planner':
     # Part 2.3: Provide start and end in world coordinate frame and convert it to map's frame
-    start_w = (-8.46, -4.88) # (Pose_X, Pose_Y) in meters
-    end_w = (-6, -10.2) # (Pose_X, Pose_Y) in meters
+    x = gps.getValues()[0]
+    y = gps.getValues()[1]
+    start_w = (x, y) # (Pose_X, Pose_Y) in meters
+    end_w = (-1.47, -9.68) # (Pose_X, Pose_Y) in meters
 
     # Convert the start_w and end_w from the webots coordinate frame into the map frame
     start =  (146, 254) # (x, y) in 360x360 map
@@ -161,7 +163,7 @@ if mode == 'planner':
 
     if path:
         # Convert map coordinates to world coordinates
-        waypoints = [((-x[1] / 360) * 12, (-x[0] / 360) * 12) for x in path]
+        waypoints = [(-12 - (((-x[1] / 360) * 12)), (-x[0] / 360) * 12) for x in path]
 
         # Save path to disk
         np.save('path.npy', waypoints)
@@ -198,57 +200,16 @@ waypoints = []
 if mode == 'autonomous':
     # Part 3.1: Load path from disk and visualize it
     waypoints = np.load('path.npy') # Replace with code to load your path
-    plt.figure()
-    plt.plot(waypoints[:, 0], waypoints[:, 1], 'o-', label="Path")
-    plt.xlabel("X")
-    plt.ylabel("Y")
-    plt.title("Waypoints")
-    plt.legend()
-    plt.show()
+    # plt.figure()
+    # plt.plot(waypoints[:, 0], waypoints[:, 1], 'o-', label="Path")
+    # plt.xlabel("X")
+    # plt.ylabel("Y")
+    # plt.title("Waypoints")
+    # plt.legend()
+    # plt.show()
     index = 0
-
-    
-    # index = 0
-    # while( index != len(waypoints) - 1 ):
-        # xr = gps.getValues()[0]
-        # yr = gps.getValues()[1]
-        # theta = np.atan2(compass.getValues()[0], compass.getValues()[1])
-        
-        # distance = np.sqrt(((xr-waypoints[index][0])*(xr-waypoints[index][0]))+((yr-waypoints[index][1])*(yr-waypoints[index][1])))
-        # bearing = np.atan2((waypoints[index][1]-yr),(waypoints[index][0]-xr))-theta
-        # if index+2 <= len(waypoints):
-            # heading = np.atan2((waypoints[index+1][1]-yr),(waypoints[index+1][0]-xr))-theta
-        
-        # if distance > .05:
-            # if bearing > .2:
-                # print('turning left')
-                # rightMotor.setVelocity(MAX_SPEED)
-                # leftMotor.setVelocity(-MAX_SPEED)
-            # elif bearing < -.2:
-                # print('turning right')
-                # rightMotor.setVelocity(-MAX_SPEED)
-                # leftMotor.setVelocity(MAX_SPEED)
-            # elif distance > 0:
-                # print('forward')
-                # rightMotor.setVelocity(MAX_SPEED)
-                # leftMotor.setVelocity(MAX_SPEED)
-        # else:
-            # print('here')
-            # if heading > .2:
-                # print('adjusting left')
-                # rightMotor.setVelocity(MAX_SPEED)
-                # leftMotor.setVelocity(-MAX_SPEED)
-            # elif heading < -.2:
-                # print('adjusting right')
-                # rightMotor.setVelocity(-MAX_SPEED)
-                # leftMotor.setVelocity(MAX_SPEED)
-            # if heading < .2 and heading > -.2:
-                # if index+2 > len(waypoints):
-                    # print('done')
-                    # index = 0
-                # else:    
-                    # print('next')
-                    # index+=1
+    print(waypoints)
+    # print(gps.getValues()[0])
 
 # state = 0 # use this to iterate through your path
 
@@ -364,17 +325,16 @@ while robot.step(timestep) != -1 and mode != 'planner':
             vL *= 0.75
             vR *= 0.75
     elif mode == 'autonomous': # not manual mode
+        rx = gps.getValues()[0]
+        ry = gps.getValues()[1]
+        print(rx, ry)
         length = len(waypoints) - 1
-        print('started', flush = True)
-        if( index != length):
-            xr = gps.getValues()[0]
-            yr = gps.getValues()[1]
-            theta = np.atan2(compass.getValues()[0], compass.getValues()[1])
-            
-            distance = np.sqrt(((xr-waypoints[index][0])*(xr-waypoints[index][0]))+((yr-waypoints[index][1])*(yr-waypoints[index][1])))
-            bearing = np.atan2((waypoints[index][1]-yr),(waypoints[index][0]-xr))-theta
+        # print('started', flush = True)
+        if( index < length ):            
+            distance = np.sqrt(((rx-waypoints[index][0])*(rx-waypoints[index][0]))+((ry-waypoints[index][1])*(ry-waypoints[index][1])))
+            bearing = np.atan2((waypoints[index][1]-ry),(waypoints[index][0]-rx))-pose_theta
             if index+1 <= length:
-                heading = np.atan2((waypoints[index+1][1]-yr),(waypoints[index+1][0]-xr))-theta
+                heading = np.atan2((waypoints[index+1][1]-ry),(waypoints[index+1][0]-rx))-pose_theta
             
             if distance > .05:
                 if bearing > .2:
@@ -408,16 +368,16 @@ while robot.step(timestep) != -1 and mode != 'planner':
                         index+=1
         # Part 3.2: Feedback controller
         #STEP 1: Calculate the error
-        rho = 0
-        alpha = 0
+        # rho = 0
+        # alpha = 0
 
         #STEP 2: Controller
-        dX = 0
-        dTheta = 0
+        # dX = 0
+        # dTheta = 0
 
         #STEP 3: Compute wheelspeeds
-        vL = 0
-        vR = 0
+        # vL = 0
+        # vR = 0
 
         # Normalize wheelspeed
         # (Keep the wheel speeds a bit less than the actual platform MAX_SPEED to minimize jerk)
