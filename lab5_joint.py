@@ -132,38 +132,57 @@ def moveArmToTarget(ikResults):
                 print("Setting {} to {}".format(my_chain.links[res].name, ikResults[res]))
 
 def calculateIk(offset_target,  orient=True, orientation_mode="Y", target_orientation=[0,0,1]):
-    '''
-    This will calculate the iK given a target in robot coords
-    Parameters
-    ----------
-    param offset_target: a vector specifying the target position of the end effector
-    param orient: whether or not to orient, default True
-    param orientation_mode: either "X", "Y", or "Z", default "Y"
-    param target_orientation: the target orientation vector, default [0,0,1]
-
-    Returns
-    ----------
-    rtype: bool
-        returns: whether or not the arm is at the target
-    '''
-
-    # Get the initial position of the motors
-    initial_position = [0,0,0,0] + [m.getPositionSensor().getValue() for m in motors] + [0,0,0,0]
-    
-    # Calculate IK
-    ikResults = my_chain.inverse_kinematics(offset_target, initial_position=initial_position,  target_orientation = [0,0,1], orientation_mode="Y")
-
-    # Use FK to calculate squared_distance error
-    position = my_chain.forward_kinematics(ikResults)
-
-    # This is not currently used other than as a debug measure...
-    squared_distance = math.sqrt((position[0, 3] - offset_target[0])**2 + (position[1, 3] - offset_target[1])**2 + (position[2, 3] - offset_target[2])**2)
-    print("IK calculated with error - {}".format(squared_distance))
-
-    # Reset the ikTarget (deprec)
-    # ikTarget = offset_target
-    
-    return ikResults
+            '''
+            Parameters
+            ----------
+            offset_target : list
+                A vector specifying the target position of the end effector
+            orient : bool, optional
+                Whether or not to orient, default True
+            orientation_mode : str, optional
+                Either "X", "Y", or "Z", default "Y"
+            target_orientation : list, optional
+                The target orientation vector, default [0,0,1]
+            
+            Returns
+            -------
+            list
+                The calculated joint angles from inverse kinematics
+            '''
+            
+            # Get the number of links in the chain
+            num_links = len(my_chain.links)
+            
+            # Create initial position array with the correct size
+            initial_position = [0] * num_links
+            
+            # Map each motor to its corresponding link position
+            motor_idx = 0
+            for i in range(num_links):
+                link_name = my_chain.links[i].name
+                if link_name in part_names and link_name != "torso_lift_joint":
+                    if motor_idx < len(motors):
+                        initial_position[i] = motors[motor_idx].getPositionSensor().getValue()
+                        motor_idx += 1
+            
+            # Calculate IK
+            ikResults = my_chain.inverse_kinematics(
+                offset_target, 
+                initial_position=initial_position,
+                target_orientation=target_orientation, 
+                orientation_mode=orientation_mode
+            )
+            
+            # Validate result
+            position = my_chain.forward_kinematics(ikResults)
+            squared_distance = math.sqrt(
+                (position[0, 3] - offset_target[0])**2 + 
+                (position[1, 3] - offset_target[1])**2 + 
+                (position[2, 3] - offset_target[2])**2
+            )
+            print(f"IK calculated with error - {squared_distance}")
+            
+            return ikResults
 
     # Legacy code for visualizing
         # import matplotlib.pyplot
