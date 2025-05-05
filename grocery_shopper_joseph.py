@@ -1,642 +1,592 @@
-"""grocery controller."""
-from controller import Robot
+from controller import Robot, Motor, Camera, RangeFinder, Lidar, Keyboard
 import math
 import numpy as np
-print("=== Initializing Grocery Shopper...")
-MAX_SPEED = 7.0  # [rad/s]
-MAX_SPEED_MS = 0.633 # [m/s]
-AXLE_LENGTH = 0.4044 # m
+from matplotlib import pyplot as plt
+from scipy.signal import convolve2d
+from ikpy.chain import Chain
+from ikpy.link import OriginLink, URDFLink
+import ikpy.utils.plot as plot_utils
+MAX_SPEED = 7.0
+MAX_SPEED_MS = 0.633
+AXLE_LENGTH = 0.4044
 MOTOR_LEFT = 10
 MOTOR_RIGHT = 11
 N_PARTS = 12
 LIDAR_ANGLE_BINS = 667
-LIDAR_SENSOR_MAX_RANGE = 5.5 # Meters
+LIDAR_SENSOR_MAX_RANGE = 2.75 # Meters
 LIDAR_ANGLE_RANGE = math.radians(240)
-world_x = -4.687245099997342
-world_y = -9.05645e-05
+##### vvv [Begin] Do Not Modify vvv #####
 robot = Robot()
 timestep = int(robot.getBasicTimeStep())
 part_names = ("head_2_joint", "head_1_joint", "torso_lift_joint", "arm_1_joint",
               "arm_2_joint",  "arm_3_joint",  "arm_4_joint",      "arm_5_joint",
-              "arm_6_joint",  "arm_7_joint",  "wheel_left_joint", "wheel_right_joint",
-              "gripper_left_finger_joint","gripper_right_finger_joint")
-target_pos = (0.0, 0.0, 0.35, 0.07, 1.02, -3.16, 1.27, 1.32, 0.0, 1.41, 'inf', 'inf',0.045,0.045)
-robot_parts={}
-for i, part_name in enumerate(part_names):
-    robot_parts[part_name]=robot.getDevice(part_name)
-    robot_parts[part_name].setPosition(float(target_pos[i]))
-    robot_parts[part_name].setVelocity(robot_parts[part_name].getMaxVelocity() / 2.0)
-left_gripper_enc=robot.getDevice("gripper_left_finger_joint_sensor")
-right_gripper_enc=robot.getDevice("gripper_right_finger_joint_sensor")
-left_gripper_enc.enable(timestep)
-right_gripper_enc.enable(timestep)
+              "arm_6_joint",  "arm_7_joint",  "wheel_left_joint", "wheel_right_joint")
+target_pos = (0.0, 0.0, 0.09, 0.07, 1.02, -3.16, 1.27, 1.32, 0.0, 1.41, 'inf', 'inf')
+robot_parts=[]
+for i in range(N_PARTS):
+    robot_parts.append(robot.getDevice(part_names[i]))
+    robot_parts[i].setPosition(float(target_pos[i]))
+    robot_parts[i].setVelocity(0)
+range_finder = robot.getDevice('range-finder')
+range_finder.enable(timestep)
 camera = robot.getDevice('camera')
 camera.enable(timestep)
 camera.recognitionEnable(timestep)
+lidar = robot.getDevice('Hokuyo URG-04LX-UG01')
+lidar.enable(timestep)
+lidar.enablePointCloud()
 gps = robot.getDevice("gps")
 gps.enable(timestep)
 compass = robot.getDevice("compass")
 compass.enable(timestep)
-lidar = robot.getDevice('Hokuyo URG-04LX-UG01')
-lidar.enable(timestep)
-lidar.enablePointCloud()
+keyboard = robot.getKeyboard()
+keyboard.enable(timestep)
 display = robot.getDevice("display")
 pose_x     = 0
 pose_y     = 0
 pose_theta = 0
 vL = 0
 vR = 0
-lidar_sensor_readings = [] # List to hold sensor readings
+lidar_sensor_readings = []
 lidar_offsets = np.linspace(-LIDAR_ANGLE_RANGE/2., +LIDAR_ANGLE_RANGE/2., LIDAR_ANGLE_BINS)
-lidar_offsets = lidar_offsets[83:len(lidar_offsets)-83] # Only keep lidar readings not blocked by robot chassis
-map = None
-# ------------------------------------------------------------------
-# Helper Functions
-def setArm(joint1,joint2,joint3,joint4,joint5,joint6,joint7,time=0):
-    robot.getDevice("arm_1_joint").setPosition(joint1)
-    robot.getDevice("arm_2_joint").setPosition(joint2)
-    robot.getDevice("arm_3_joint").setPosition(joint3)
-    robot.getDevice("arm_4_joint").setPosition(joint4)
-    robot.getDevice("arm_5_joint").setPosition(joint5)
-    robot.getDevice("arm_6_joint").setPosition(joint6)
-    robot.getDevice("arm_7_joint").setPosition(joint7)
-    robot.step(time)
-
-def getPoint(eqs,t):#get one point from equation for possible elbow positions
-    return (f(t) for f in eqs)    
-def formulateEquations(goal,r1,r2):#gx is goal_x, r1 is first semgent len, r2 is second
-    #circle of results
-    (xg,yg,zg)=goal
-    d2=xg*xg+yg*yg+zg*zg# distance of goal from origin, squared
-    d=math.sqrt(d2)
-    if d>r1+r2:
-        print("out of reach")#
-        return 0,0,0#out of reach
-    rDiff=(r1-r2)*(r1+r2)# difference of squares of segment lengths
-    bigRoot=math.sqrt(4*d2*r1*r1-(d2+rDiff)**2)
-    smallRoot=math.sqrt(yg*yg+zg*zg)
-    term1=rDiff/(2*d2)+0.5# for X,Y,Z
-    term2=bigRoot/(2*d*smallRoot)# for Y,Z
-    #print("pre-vals:",d2,d,rDiff,bigRoot,smallRoot,term1,term2,xg,yg,zg,r1,r2)
-    def X(t): return xg*term1+math.sin(t)*(smallRoot*bigRoot/(2*d2))
-    def Y(t): return yg*term1-(zg*math.cos(t)+yg*xg*math.sin(t)/d)*term2
-    def Z(t): return zg*term1+(yg*math.cos(t)-zg*xg*math.sin(t)/d)*term2
-    #t_=4.56
-    #print(f"test t={t_}, output=({X(t_)},{Y(t_)},{Z(t_)})")
-    return X,Y,Z
-def moveArmToPoint(true_goal,wrist_goal=None,randomizeElbow=False):
-    global part_names
-    r1=0.311105247641 #first segment length
-    r2=0.370789854306 #second segment length (maybe actually =0.315780840772)
-    r3=0.2 #claw (just a guess)
-    
-    if wrist_goal==None:
-        wrist_goal=(true_goal[0],true_goal[1]-r3,true_goal[2])
-    #goal = (true_goal[0],true_goal[1],true_goal[2]+r3)#"goal" is goal for wrist
-    goal=wrist_goal#don't worry about it
-    
-    #if goal[1]<0:
-    #    print("need y>=0 (probably)")
-    #    return 3#scoot back
-    dist = ((goal[0]*goal[0])+(goal[1]*goal[1])+(goal[2]*goal[2]))**0.5
-    #print("distance:",dist,flush=True)#
-    if goal[1]==0 and goal[2]==0:
-        goal[2]=0.000001
-    #goal coords are relative coordinates to robot arm origin
-    #displacement between j1,j2 = 0.130038455851
-    #irl robot official arm reach: 87cm "without end effector"
-    if dist>r1+r2:
-        print("out of reach")
-        return 1#out of reach
-    
-    joint4=math.acos((sum(k*k for k in goal)-r1*r1-r2*r2)/(2*r1*r2))#law of cosines
-    inner_acute=sum(k*k for k in goal)<r1*r1+r2*r2
-    if inner_acute and joint4<math.pi/2:#joint4 is outer angle
-        joint4=math.pi-joint4
-    elif not inner_acute and joint4>math.pi/2:
-        joint4=math.pi-joint4    
-        
-    if joint4>2.29:
-        print("elbow bend beyond joint range")
-        return 2#can't bend that way
-    eqs = formulateEquations(goal,r1,r2)
-    import random
-    tStart=random.randint(0,60)/10 if randomizeElbow else 1 #0 will probably be best in most situations
-    t=tStart
-    inJointRange=False
-    reachedClawAngles=False
-    while not inJointRange:
-        inJointRange=True
-        xe,ye,ze = getPoint(eqs,t)
-        #print(f"t={t}, elbow=({(xe,ye,ze)})")
-        #now just turn that into angle reqs
-        joint1=math.atan2(ye,xe)
-        joint2=math.asin(ze/r1)#maybe no (maybe yes?) math.pi/2- on actual robot implementation
-        inJointRange=joint1>=0.07 and joint1<=2.68 and joint2>=-1.5 and joint2<=1.02
-        if inJointRange:
-            def rotateWorld(E,G):
-                #part 1: rotate xy
-                xy_rot = math.atan2(E[1],E[0])# ==joint1 if E,G are elbow,goal
-                G=(G[0]*math.cos(-xy_rot)-G[1]*math.sin(-xy_rot), G[0]*math.sin(-xy_rot)+G[1]*math.cos(-xy_rot), G[2])
-                #part 2: rotate xz
-                E_temp=(E[0]*math.cos(-xy_rot)-E[1]*math.sin(-xy_rot), E[0]*math.sin(-xy_rot)+E[1]*math.cos(-xy_rot), E[2])
-                #print("E_temp:",E_temp)#
-                xz_rot=math.atan2(E_temp[2],E_temp[0])# ==joint2 if E,G are elbow,goal
-                    
-                #E_temp=(E_temp[0]*math.cos(-xz_rot)-E_temp[2]*math.sin(-xz_rot), E_temp[1], E_temp[0]*math.sin(-xz_rot)+E_temp[2]*math.cos(-xz_rot))#
-                #print("E_{rot}="+str(E_temp))#for debugging (should be (k,0,0) )
-                
-                G=(G[0]*math.cos(-xz_rot)-G[2]*math.sin(-xz_rot), G[1], G[0]*math.sin(-xz_rot)+G[2]*math.cos(-xz_rot))
-                return G
-            goal_rot=rotateWorld((xe,ye,ze),goal)
-            joint3=math.atan2(goal_rot[1],goal_rot[2])+math.pi #atan(y/z)
-            #if joint3>math.pi:#better version below
-            #    joint3-=2*math.pi
-            
-            #joint3=math.atan2(ye,xe)-0.5*math.pi
-            if joint3>1.5:
-                joint3-=2*math.pi
-                #if joint3>=-3.46:#
-                #    print("\tjoint3 saved!")#
-            if joint3<-3.46:
-                inJointRange=False
-                #print("joint3 out of range")
-            else:#joint6
-                print("goal_rot:",goal_rot," joint3:",joint3,flush=True)#
-                reachedClawAngles=True
-                #pointing claw forward (positive y)
-                claw_goal=(goal[0],goal[1]+r3,goal[2])#true_goal
-                claw_elbow_dist2=((claw_goal[0]-xe)**2+(claw_goal[1]-ye)**2+(claw_goal[2]-ze)**2)
-                joint6=math.acos((claw_elbow_dist2-r3*r3-r2*r2)/(2*r3*r2))#law of cosines
-                inner_acute=claw_elbow_dist2<r3*r3+r2*r2
-                if inner_acute and joint6<math.pi/2:#joint4 is outer angle
-                    joint6=math.pi-joint6
-                elif not inner_acute and joint6>math.pi/2:
-                    joint6=math.pi-joint6
-                if joint6>1.39:
-                    print(f"joint6 out of range ({joint6}>1.39)")#
-                    inJointRange=False
-                else:#joint5
-                    #print("\telbow:",(xe,ye,ze),"
-                    #claw_goal_rot=rotateWorld((goal[0]-xe,goal[1]-ye,goal[2]-ze),(claw_goal[0]-xe,claw_goal[1]-ye,claw_goal[2]-ze))
-                    #joint5=math.atan2(claw_goal_rot[1],claw_goal_rot[2])+math.pi/2-joint3 #same logic as joint3, minus joint3 
-                    
-                    #use the adjusted rot values from earlier
-                    elbow_rot=(r1,0,0)
-                    #goal_rot=goal_rot
-                    true_rot=rotateWorld((xe,ye,ze),true_goal)
-                    #print(f"debug1 E={elbow_rot}, G={goal_rot}, T={true_rot}")#
-                    def desmosPrint(elbow_rot,goal_rot,true_rot,var_num=0,spacing=False):#fancy debug tool
-                        (elbow_rot,goal_rot,true_rot)=("\\left("+str(["{:f}".format(i) for i in point])[1:-1]+"\\right)" for point in (elbow_rot,goal_rot,true_rot))
-                        if spacing:
-                            print("")
-                        print(f"D_{var_num}=",end="")
-                        print(("\\left["+elbow_rot+","+goal_rot+","+true_rot+"\\right]").replace("'",""))
-                        if spacing:
-                            print("")
-                    def rotateXY(G,xy_rot):
-                        return (G[0]*math.cos(-xy_rot)-G[1]*math.sin(-xy_rot), G[0]*math.sin(-xy_rot)+G[1]*math.cos(-xy_rot), G[2])
-                    def rotateXZ(G,xz_rot):#z is y
-                        return (G[0]*math.cos(-xz_rot)-G[2]*math.sin(-xz_rot), G[1], G[0]*math.sin(-xz_rot)+G[2]*math.cos(-xz_rot))
-                    def rotateYZ(G,xz_rot):#y is x
-                        return (G[0], G[1]*math.cos(-xz_rot)-G[2]*math.sin(-xz_rot), G[1]*math.sin(-xz_rot)+G[2]*math.cos(-xz_rot))
-                    
-                    #elbow_rot=(r1,0,0)    
-                    #goal_rot=(0.27209659807614145, 0.3302318858857273, -0.16404372240273835)#placeholder for rotateWorld((xe,ye,ze),goal)
-                    #true_rot=(0.4541767276390809, 0.4020098322591067, -0.2052110982331633)#placeholder for rotateWorld((xe,ye,ze),true_goal)
-                    #joint3=math.atan2(goal_rot[1],goal_rot[2])+math.pi #evals to 5.173435720066505 (-2pi = -1.1097495871130816)
-                    #joint3 = joint3-2*math.pi if joint3>1.5 else joint3 #shouldn't affect math i don't think
-                    #print(f"debug1 E={elbow_rot}, G={goal_rot}, T={true_rot}")#
-                    #print(f"\tjoint3={joint3}")
-                    #desmosPrint(elbow_rot,goal_rot,true_rot,1)
-                    
-                    #step 1: "undo" rotation so it doesn't affect j5
-                    (elbow_rot,goal_rot,true_rot) = (rotateYZ(point,-joint3) for point in (elbow_rot,goal_rot,true_rot))
-                    #print(f"debug2 E={elbow_rot}, G={goal_rot}, T={true_rot}")#
-                    #desmosPrint(elbow_rot,goal_rot,true_rot,2)
-                    
-                    #step 2: move elbow_rot to origin
-                    (elbow_rot,goal_rot,true_rot) = ((point[0]-r1,point[1],point[2]) for point in (elbow_rot,goal_rot,true_rot))
-                    #print(f"debug3 E={elbow_rot}, G={goal_rot}, T={true_rot}")#
-                    #desmosPrint(elbow_rot,goal_rot,true_rot,3)
-                    
-                    #step 3: align goal_rot to positive z axis
-                    temp_angle=-math.atan2(goal_rot[0],goal_rot[2])
-                    (elbow_rot,goal_rot,true_rot) = (rotateXZ(point,temp_angle) for point in (elbow_rot,goal_rot,true_rot))
-                    #print(f"debug4 E={elbow_rot}, G={goal_rot}, T={true_rot}")#
-                    #desmosPrint(elbow_rot,goal_rot,true_rot,4)
-                    
-                    #step 4: align true_rot to positive xz plane
-                    joint5=-math.atan2(true_rot[0],true_rot[1]) #possibly + some number of quarter rotations
-                    #print(f"debug5 E={elbow_rot}, G={goal_rot}, T={true_rot}")#
-                    #desmosPrint(elbow_rot,goal_rot,true_rot,5)
-                    #print(f"joint5={joint5}")
-                    
-                    
-                    while joint5>2.07:
-                        joint5-=math.pi
-                        joint6*=-1
-                        #print("(flipping j6)")#
-                    while joint5<-2.07:
-                        joint5+=math.pi
-                        joint6*=-1
-                        #print("(flipping j6)")#
-                    if joint5<-2.07 or joint5>2.07:
-                        print("j5 out of range")#impossible, but just in case
-                        inJointRange=False
-                    else:#joint7
-                        joint7=joint3-joint5+math.pi/2
-                        while joint7>2.07:
-                            joint7-=math.pi
-                        while joint7<-2.07:
-                            joint7+=math.pi
-                        if joint7>2.07 or joint7<-2.07:
-                            print("j7 out of range")#impossible, but just in case
-                            joint7=2.07 if joint7>2.07 else -2.07
-                    
-                    
-        if not inJointRange:
-            #print("angles:",joint1,"and",joint2)#
-            #print("beyond joint range")
-            t-=0.1
-            #if (abs(tStart-2*math.pi-t)<0.01):
-            if (t<tStart-2*math.pi):
-                print("no option in joint range")
-                return 2#can't bend that way
-    #https://cyberbotics.com/doc/guide/tiago-steel?version=R2023a
-    #d2=xg*xg+yg*yg+zg*zg# distance of goal from origin, squared
-    #print(f"t={t}, elbow=({(xe,ye,ze)})")#
-    print("angles:",joint1,joint2,joint3,joint4)#,joint5,joint6,joint7)#
-    #setArm(joint1,joint2,joint3,joint4,joint5,joint6,joint7)
-    return (joint1,joint2,joint3,joint4,joint5,joint6,joint7)
-        
-def identifyCubes(yellow=True,green=False): 
-    obj_coords=[]
-    for obj in camera.getRecognitionObjects():
-        if obj.getNumberOfColors()!=1:
-            continue#the things we want are only one color
-        color=obj.getColors()
-        RGB=(color[0],color[1],color[2])
-        if yellow and RGB==(1.0,1.0,0.0):
-            obj_coords.append(obj.getPosition())
-        if green and RGB==(0.0,1.0,0.0):
-            obj_coords.append(obj.getPosition())
-            
-    if len(obj_coords)>1:
-        obj_coords.sort(key=lambda x:x[0]**2+x[1]**2+x[2]**2)#closest first
-    return obj_coords
-
-def collectCube(goal):
-    r1=0.311105247641 #first segment length
-    r2=0.370789854306 #second segment length (maybe actually =0.315780840772)
-    r3=0.2 #claw (estimated)
-    
-    pose_angles=moveArmToPoint(goal)
-    if (pose_angles==1):#out of reach
-        return False
-    elif (pose_angles==2):#arm can't bend that way
-        return False
-    
-    #assuming robot's been lined up already
-    SCOOT_SPEED=0.5#max is 7
-    SCOOT_TIME=6000
-    #0.5,6000 is roughly 0.3 meters
-    
-    #(x0,y0,z0) = gps.getValues()
-    #step 1: scoot back
-    robot_parts["wheel_left_joint"].setVelocity(-SCOOT_SPEED)#max is 7
-    robot_parts["wheel_right_joint"].setVelocity(-SCOOT_SPEED)
-    robot.step(SCOOT_TIME)
-    robot_parts["wheel_left_joint"].setVelocity(0)
-    robot_parts["wheel_right_joint"].setVelocity(0)
-    #(x1,y1,z1) = gps.getValues()
-    
-    #step 2: pose arm and small adjustment:
-    target_theta = (pose_theta + math.pi - joint1) % (2 * math.pi)
-    rotation_speed = 2.0
-    robot_parts["wheel_left_joint"].setVelocity(rotation_speed)
-    robot_parts["wheel_right_joint"].setVelocity(-rotation_speed)
-    while abs(pose_theta - target_theta) > 0.01:  # Small threshold for precision
-        v = (vL + vR) / 2.0
-        omega = (vR - vL) / AXLE_LENGTH
-        delta_x = v * math.cos(pose_theta) * (timestep / 1000.0)
-        delta_y = v * math.sin(pose_theta) * (timestep / 1000.0)
-        delta_theta = omega * (timestep / 1000.0)
-    
-        pose_x += delta_x
-        pose_y += delta_y
-        pose_theta += delta_theta
-        pose_theta %= (2 * math.pi)
-    
-        robot.step(timestep)
-    robot_parts["wheel_left_joint"].setVelocity(0)
-    robot_parts["wheel_right_joint"].setVelocity(0)
-    distance_moved = 0.0
-    target_distance = 0.130038455851  # j1_j2_displacement
-    reverse_speed = -2.0  # Adjust as needed
-    robot_parts["wheel_left_joint"].setVelocity(reverse_speed)
-    robot_parts["wheel_right_joint"].setVelocity(reverse_speed)
-    while distance_moved < target_distance:
-        v = (vL + vR) / 2.0
-        delta_x = v * math.cos(pose_theta) * (timestep / 1000.0)
-        delta_y = v * math.sin(pose_theta) * (timestep / 1000.0)
-        
-        distance_moved += (delta_x**2 + delta_y**2)**0.5  # Compute step displacement
-        robot.step(timestep)
-    robot_parts["wheel_left_joint"].setVelocity(0)
-    robot_parts["wheel_right_joint"].setVelocity(0)
-    target_theta = (pose_theta - (math.pi - joint1)) % (2 * math.pi)
-    rotation_speed = 2.0  # Adjust as needed
-    robot_parts["wheel_left_joint"].setVelocity(-rotation_speed)
-    robot_parts["wheel_right_joint"].setVelocity(rotation_speed)
-    while abs(pose_theta - target_theta) > 0.01:  # Small threshold for precision
-        v = (vL + vR) / 2.0
-        omega = (vR - vL) / AXLE_LENGTH
-        delta_theta = omega * (timestep / 1000.0)
-    
-        pose_theta += delta_theta
-        pose_theta %= (2 * math.pi)  # Normalize
-    
-        robot.step(timestep)
-    robot_parts["wheel_left_joint"].setVelocity(0)
-    robot_parts["wheel_right_joint"].setVelocity(0)
-    setArm(*pose_angles)
-    robot.step(4000)
-    
-    #step 3: scoot forward:
-    robot_parts["wheel_left_joint"].setVelocity(SCOOT_SPEED)
-    robot_parts["wheel_right_joint"].setVelocity(SCOOT_SPEED)
-    robot.step(SCOOT_TIME)
-    robot_parts["wheel_left_joint"].setVelocity(0)
-    robot_parts["wheel_right_joint"].setVelocity(0)
-    #robot.step(2000)
-    #(x0,y0,z0) = gps.getValues()
-    #dist=((x1-x0)**2+(y1-y0)**2+(z1-z0)**2)**.5
-    #print("dist2:",dist,"\n")
-    
-    #step 4: grab!
-    robot_parts["gripper_left_finger_joint"].setPosition(0)
-    robot_parts["gripper_right_finger_joint"].setPosition(0)
-    robot.step(4000)
-    
-    #step 5: scoot back again
-    robot_parts["wheel_left_joint"].setVelocity(-SCOOT_SPEED)
-    robot_parts["wheel_right_joint"].setVelocity(-SCOOT_SPEED)
-    robot.step(SCOOT_TIME)
-    robot_parts["wheel_left_joint"].setVelocity(0)
-    robot_parts["wheel_right_joint"].setVelocity(0)
-    
-    #step 5.5 (optional): verify
-    robot.getDevice("arm_1_joint").setPosition(0.65)
-    robot.getDevice("arm_2_joint").setPosition(-0.25)
-    robot.getDevice("arm_3_joint").setPosition(-2.5)
-    robot.getDevice("arm_4_joint").setPosition(2.29)
-    robot.getDevice("arm_5_joint").setPosition(0)
-    robot.getDevice("arm_6_joint").setPosition(0)
-    robot.getDevice("arm_7_joint").setPosition(-0.7)
-    robot.step(3000)
-    cube_coords=identifyCubes(True,True)
-    if cube_coords==[] or cube_coords[0][0]**2+cube_coords[0][1]**2+cube_coords[0][2]**2>0.4**2:
-        print("the cube has eluded my grasp")
-        return False
-        
-    #step 6: position above basket:
-    robot.getDevice("arm_1_joint").setPosition(0.07)
-    robot.getDevice("arm_2_joint").setPosition(0)
-    robot.getDevice("arm_3_joint").setPosition(0)
-    robot.getDevice("arm_4_joint").setPosition(2.29)
-    robot.getDevice("arm_5_joint").setPosition(0)
-    robot.getDevice("arm_6_joint").setPosition(0)
-    robot.getDevice("arm_7_joint").setPosition(-1.5)
-    robot.step(3000)
-    
-    #step 7: ungrab
-    robot_parts["gripper_left_finger_joint"].setPosition(0.045)
-    robot_parts["gripper_right_finger_joint"].setPosition(0.045)
-    robot.step(2000)
-    
-    #step 8: return out to rest (out of the way)
-    #from initialization: 0.07, 1.02, -3.16, 1.27, 1.32, 0.0, 1.41
-    robot.getDevice("arm_1_joint").setPosition(0.07)
-    robot.getDevice("arm_2_joint").setPosition(1.02)
-    robot.getDevice("arm_3_joint").setPosition(-3.16)
-    robot.getDevice("arm_4_joint").setPosition(1.27)
-    robot.getDevice("arm_5_joint").setPosition(1.32)
-    robot.getDevice("arm_6_joint").setPosition(0)
-    robot.getDevice("arm_7_joint").setPosition(1.41)
-    robot.step(2000)
-    
-    #step 9 (optional): scoot forwards again to not screw up odometry (too much)
-    robot_parts["wheel_left_joint"].setVelocity(SCOOT_SPEED)#max is 7
-    robot_parts["wheel_right_joint"].setVelocity(SCOOT_SPEED)
-    robot.step(SCOOT_TIME)
-    robot_parts["wheel_left_joint"].setVelocity(0)
-    robot_parts["wheel_right_joint"].setVelocity(0)
-
-    return True#success
-
-# mode='grabby'
-# mode='IK_demo'
-# mode='shopping'
-# mode='object_dist_demo'
-mode='testing'
-
-gripper_status="closed"
-
-# Main Loop
-#Xtest,Ytest,Ztest=-3,1,-3
-cube_coords_global=[]#not currently used
-while robot.step(timestep) != -1:
-    
-    robot_parts["wheel_left_joint"].setVelocity(vL)
-    robot_parts["wheel_right_joint"].setVelocity(vR)
-    
-    if mode=='shopping':
-        r1=0.311105247641 #first segment length
-        r2=0.370789854306 #second segment length (maybe actually =0.315780840772)
-        r3=0.2 #claw (just a guess)
-        
-        # pos=gps.getValues()
-        # print(pos)
-        v = (vL + vR) / 2.0
-        omega = (vR - vL) / AXLE_LENGTH
-        delta_x = v * math.cos(pose_theta) * (timestep / 1000.0)
-        delta_y = v * math.sin(pose_theta) * (timestep / 1000.0)
-        delta_theta = omega * (timestep / 1000.0)
-        pose_x += delta_x
-        pose_y += delta_y
-        pose_theta += delta_theta
-        pose_theta %= (2 * math.pi)
-        # print("X: %f Y: %f Theta: %f " % (pose_x,pose_y,pose_theta))
-        world_x += delta_x * math.cos(pose_theta)/(34/3)
-        world_y += delta_y * math.sin(pose_theta)/(34/3)
-        print(world_x, world_y)
-        pos = (world_x, world_y, gps.getValues()[2])
-        print(pos)
-        #step 1: try to spot yellow cubes
-        cube_coords=identifyCubes(yellow=True,green=False)
-        if False:#might be nice to have object permanence (incomplete)
-            cube_coords_local=cube_coords
-            new_cubes=False
-            for ccl in cube_coords_local:#i can speed this up if it's too slow
-                ccl=(ccl[0]+pos[0],ccl[1]+pos[1],ccl[2]+pos[2])#TODO: account for rotation
-                for ccg in cube_coords_global:#object permenance
-                    if ((ccl[0]-ccg[0])**2+(ccl[1]-ccg[1])**2+(ccl[2]-ccg[2])**2)**0.5 < 0.01:#same cube
-                        break
-                else:#if didn't break from inner loop
-                    cube_coords_global.append(ccl)
-                    new_cubes=True
-            if new_cubes:
-                cube_coords_global.sort(lambda x:(x[0]-pos[0])**2+(x[1]-pos[1])**2+(x[2]-pos[2])**2)
-            cube_coords=cube_coords_global 
-        
-        #step 2: move to nearest cube (or explore if no cubes)
-        if cube_coords==[]:
-            #TODO: explore
-            continue#skip steps 3+
-        goal=cube_coords[0]
-        #adj_goal=(goal[1]+0.0137,goal[0]+0.137,goal[2]+0.326797)#what IK methods will want
-        adj_goal=(goal[1]+0.0137,goal[0]+0.137,goal[2]+0.4)#alt version (slightly higher)
-        test_goal=(adj_goal[0],adj_goal[1]-r3,adj_goal[2])#where robot wrist is aiming (in IK perspective)
-        test_goal_dist=sum(g*g for g in test_goal)**0.5#
-        #dist = ((test_goal[0]*test_goal[0])+(test_goal[1]*test_goal[1])+(test_goal[2]*test_goal[2]))**0.5
-            
-        
-        print("test_goal is "+("in range " if test_goal_dist<=r1+r2 else "out of range ")+f"({test_goal_dist})",flush=True)
-        if test_goal_dist>r1+r2:#maybe >=, or -0.01>
-            pass#TODO: move towards cube_coords[0]
-            robot_parts["wheel_left_joint"].setVelocity(1)#placeholder
-            robot_parts["wheel_right_joint"].setVelocity(1)
-            robot.step(500)
-            robot_parts["wheel_left_joint"].setVelocity(0)
-            robot_parts["wheel_right_joint"].setVelocity(0)
-            cube_z = goal[2]  # Z-coordinate of the detected cube
-            if cube_z < 0.25:  # Lower shelf
-                robot.getDevice("torso_lift_joint").setPosition(0.0)
-            else:  # Upper shelf
-                robot.getDevice("torso_lift_joint").setPosition(0.35)
-            robot.step(1000)  # Give time for torso lift to adjust
-            #if adj_goal[2]>robot_parts["torso_lift_joint"].getPosition()[2]:
-            continue#remove after replacing placeholder
-        else:
-            robot_parts["wheel_left_joint"].setVelocity(0)
-            robot_parts["wheel_right_joint"].setVelocity(0)
-            robot.step(5000)
-        
-        #step 5: the engrabbening
-        #adj_goal=(goal[1],goal[0],goal[2])#relative to start of arm, assuming robot is facing positive Y (swap x/y)
-        #camera: 1.79165, 1.30525, 1.05289
-        #j1 (origin-ish): 1.77795, 1.16825, 0.726093
-        #translation: 0.0137, 0.137, 0.326797
-        
-        #(already made it)#adj_goal=(goal[1]+0.0137,goal[0]+0.137,goal[2]+0.326797)
-        print("and thus begins the engrabbening",flush=True)#
-        success=collectCube(adj_goal)
-        if success:
-            print("WE DID IT",flush=True)#
-            cube_coords.pop(0)
-        else:
-            pass#wiggle around and try again?
-        
-    elif mode=='testing':
-        robot.step(1000)#move to a spot on the shelf, then test cube pick up process
-        print("going to the store",flush=True)
-        #go to cube (set up test)
-        robot_parts["wheel_left_joint"].setVelocity(-7)
-        robot_parts["wheel_right_joint"].setVelocity(7)
-        robot.step(500)
-        robot_parts["wheel_left_joint"].setVelocity(7)
-        robot.step(2000)
-        robot_parts["wheel_right_joint"].setVelocity(-7)
-        robot.step(1200)
-        robot_parts["wheel_right_joint"].setVelocity(7)
-        robot.step(2000)
-        robot_parts["wheel_right_joint"].setVelocity(-7)
-        robot.step(1200)
-        robot_parts["wheel_right_joint"].setVelocity(7)
-        robot.step(650)
-        robot_parts["wheel_left_joint"].setVelocity(0)
-        robot_parts["wheel_right_joint"].setVelocity(0)
-        print("Cube Time",flush=True)
-        robot.step(1000)
-        """
-        robot.getDevice("arm_1_joint").setPosition(0.65)
-        robot.getDevice("arm_2_joint").setPosition(-0.25)
-        robot.getDevice("arm_3_joint").setPosition(-2.5)
-        robot.getDevice("arm_4_joint").setPosition(2.29)
-        robot.getDevice("arm_5_joint").setPosition(0)
-        robot.getDevice("arm_6_joint").setPosition(0)
-        robot.getDevice("arm_7_joint").setPosition(-0.7)
-        """
-        moveArmToPoint((0,0.25,0),(0,0.25,0.2))
-        #moveArmToPoint((-0.2,0.25,0),(0,0.25,0))
-        #robot.getDevice("torso_lift_joint").setPosition(0)#testing lower shelf (move higher cube off shelf first)
-        robot.step(12000)
-        mode='shopping'
-    elif mode=='grabby':#came with the project
-        if(gripper_status=="open"):
-            # Close gripper, note that this takes multiple time steps...
-            robot_parts["gripper_left_finger_joint"].setPosition(0)
-            robot_parts["gripper_right_finger_joint"].setPosition(0)
-            if right_gripper_enc.getValue()<=0.005:
-                gripper_status="closed"
-        else:
-            # Open gripper
-            robot_parts["gripper_left_finger_joint"].setPosition(0.045)
-            robot_parts["gripper_right_finger_joint"].setPosition(0.045)
-            if left_gripper_enc.getValue()>=0.044:
-                gripper_status="open"
-    elif mode=='IK_demo':#demoing reaching the same point in multiple ways
-        #note, coordinates centered on first arm joint
-        #print(f"X={Xtest}, Y={Ytest}, Z={Ztest}",flush=True)#
-        #goal=(Xtest/10,Ytest/10,Ztest/10)
-        print("starting test",flush=True)
-        moveArmToPoint((-.2,.6,-.1),randomizeElbow=True)#(0.64818,.33,-0.2553)
-        robot.step(5000)
-    elif mode=='object_dist_demo':#demoing getting yellow cubes and their positions
-        #torso range: [0, 0.35]
-        #camera: width=240, height=135, FOV=2
-        #calculated focal length: 1.438839533241073
-        print("focal length:",robot.getDevice('camera').getFocalLength())
-        print("focal distance:",robot.getDevice('camera').getFocalDistance())
-        print("FOV:",robot.getDevice('camera').getFov())
-        focal_length=2 * math.atan(math.tan(camera.getFov() * 0.5) / (240 / 135))
-        print("calculated:",focal_length)
-        #horiz_dist=focal_length*(-0.35)/abs(y2-y1)
-        seen_objects=camera.getRecognitionObjects()
-        print(len(seen_objects),"objects recognized")
-        yellow_objects=[]
-        for obj in seen_objects:
-            colors = obj.getColors()
-            obj_pos=obj.getPosition()
-            #print(obj.getNumberOfColors(),"colors")
-            if obj.getNumberOfColors()>1:
-                print("MULTIPLE COLORS!",obj.getNumberOfColors())
-                #for some reason it's a C_array, where every three indices are a color
-                colorsList=[(colors[i*3],colors[i*3+1],colors[i*3+2]) for i in range(obj.getNumberOfColors())]
-                print("\t",colorsList)#
-            if colors:
-                #print("\t",colors[0],colors[1],colors[2])
-                RGB=(colors[0],colors[1],colors[2])
-                if RGB==(1.0,1.0,0.0):
-                    print("yellow")
-                    yellow_objects.append(obj.getPosition())
-                if RGB==(0.0,1.0,0.0):
-                    print("green")#append anyways?
-                else:
-                    pass#print("not yellow (nor green)")
-                #print(list(colors))
-                #first_color = colors[1]
-                #print("first color:",first_color)
-                #print(f"    -> First color: R={first_color[0]:.2f}, G={first_color[1]:.2f}, B={first_color[2]:.2f}")
-            #print("\tcolors:",*obj_colors)
-            #print("\trel_pos:",*obj_pos)
-            #to convert to IK goal point, swap x,y and adjust for "origin"
-            #break
-        if len(yellow_objects)>1:
-            yellow_objects.sort(key=lambda x:x[0]**2+x[1]**2+x[2]**2)#closest first
+lidar_offsets = lidar_offsets[83:len(lidar_offsets)-83]
+##### ^^^ [End] Do Not Modify ^^^ #####
+##################### IMPORTANT #####################
+# Set the mode here. Please change to 'autonomous' before submission
+# mode = 'manual' # Part 1.1: manual mode
+# mode = 'planner'
+mode = 'autonomous'
+# mode = 'picknplace'
+###################
+# Planner
+###################
+if mode == 'planner':
+    x = gps.getValues()[0]
+    y = gps.getValues()[1]
+    start_w = (x, y)
+    end_w = (-1.47, -9.68)
+    start =  (146, 254)
+    end = (306, 180)
+    def heuristic(a, b):
+        return math.sqrt((a[0] - b[0])**2 + (a[1] - b[1])**2)
+    def path_planner(map, start, end):
+        rows, cols = map.shape
+        open_set = [(heuristic(start, end), start)]
+        came_from = {}
+        g_score = {start: 0}
+        f_score = {start: heuristic(start, end)}
+        while open_set:
+            open_set.sort()
+            _, current = open_set.pop(0)
+            if current == end:
+                path = []
+                while current in came_from:
+                    path.append(current)
+                    current = came_from[current]
+                path.append(start)
+                return path[::-1]
+            for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                neighbor = (current[0] + dx, current[1] + dy)
+                if 0 <= neighbor[0] < rows and 0 <= neighbor[1] < cols and map[neighbor[0], neighbor[1]] == 0:
+                    tentative_g_score = g_score[current] + 1
+                    if neighbor not in g_score or tentative_g_score < g_score[neighbor]:
+                        came_from[neighbor] = current
+                        g_score[neighbor] = tentative_g_score
+                        f_score[neighbor] = tentative_g_score + heuristic(neighbor, end)
+                        open_set.append((f_score[neighbor], neighbor))
+        return []
+    map = np.load('map.npy')
+    map = np.rot90(map, k=-1)
+    map = np.fliplr(map)
+    plt.imshow(map, cmap='gray')
+    kernel = np.ones((10,10))
+    config_space = convolve2d(map, kernel, mode='same', boundary='fill', fillvalue=0)
+    config_space = np.clip(config_space, 0, 1)
+    plt.imshow(config_space, cmap='gray')
+    plt.title("Configuration Space")
+    start_map = (150, 112)
+    end_map = (288, 320)
+    path = path_planner(config_space, start_map, end_map)
+    if path:
+        waypoints = [(-12 - (((-x[1] / 360) * 12)), (-x[0] / 360) * 12) for x in path]
+        np.save('path.npy', waypoints)
+        for coord in path:
+            config_space[coord[0], coord[1]] = 0.5
+        # plt.imshow(config_space, cmap='magma')
+        # plt.title("Path Visualization")
+        # plt.show()
+        print('here')
     else:
-        print("no mode set")
-        robot.step(5000)
+        print("No path found.")
+######################
+#
+# Map Initialization
+#
+######################
+# Part 1.2: Map Initialization
+# Initialize your map data structure here as a 2D floating point array
+map = np.zeros(shape=[360,360])
+inc = 5e-3
+waypoints = []
 
-#https://cyberbotics.com/doc/guide/tiago-steel?version=R2023a
+if mode == 'autonomous':
+    # Part 3.1: Load path from disk and visualize it
+    waypoints = np.load('path.npy') # Replace with code to load your path
+    #waypoints=[[(12-xy[0]),xy[1]] for xy in waypoints]
+    #plt.figure()
+    #plt.plot(waypoints[:, 0], waypoints[:, 1], 'o-', label="Path")
+    #plt.xlabel("X")
+    #plt.ylabel("Y")
+    #plt.title("Waypoints")
+    #plt.legend()
+    #plt.show()
+    index = 0
+# state = 0 # use this to iterate through your path
+
+if mode == 'picknplace':
+    # Part 4: Use the function calls from lab5_joints using the comments provided there
+    # they forgot to put the loose code in lab5_joint into a __main__ method, so copying the necessary methods here
+    target_item_list = ["orange"]
+
+
+    vrb = True
+    # Enable Camera
+    camera = robot.getDevice('camera')
+    camera.enable(timestep)
+    camera.recognitionEnable(timestep)
+    
+    # We are using a GPS and compass to disentangle mapping and localization
+    gps = robot.getDevice("gps")
+    gps.enable(timestep)
+    compass = robot.getDevice("compass")
+    compass.enable(timestep)
+    
+    ## fix file paths
+    ################ v [Begin] Do not modify v ##################
+    
+    base_elements=["base_link", "base_link_Torso_joint", "Torso", "torso_lift_joint", "torso_lift_link", "torso_lift_link_TIAGo front arm_11367_joint", "TIAGo front arm_11367"]
+    my_chain = Chain.from_urdf_file("tiago_urdf.urdf", base_elements=["base_link", "base_link_Torso_joint", "Torso", "torso_lift_joint", "torso_lift_link", "torso_lift_link_TIAGo front arm_11367_joint", "TIAGo front arm_11367"])
+    
+    print(my_chain.links)
+    
+    part_names = ("head_2_joint", "head_1_joint", "torso_lift_joint", "arm_1_joint",
+                "arm_2_joint",  "arm_3_joint",  "arm_4_joint",      "arm_5_joint",
+                "arm_6_joint",  "arm_7_joint",  "wheel_left_joint", "wheel_right_joint")
+    
+    for link_id in range(len(my_chain.links)):
+    
+        # This is the actual link object
+        link = my_chain.links[link_id]
+        
+        # I've disabled "torso_lift_joint" manually as it can cause
+        # the TIAGO to become unstable.
+        if link.name not in part_names or  link.name =="torso_lift_joint":
+            print("Disabling {}".format(link.name))
+            my_chain.active_links_mask[link_id] = False
+            
+    # Initialize the arm motors and encoders.
+    motors = []
+    for link in my_chain.links:
+        if link.name in part_names and link.name != "torso_lift_joint":
+            motor = robot.getDevice(link.name)
+    
+            # Make sure to account for any motors that
+            # require a different maximum velocity!
+            if link.name == "torso_lift_joint":
+                motor.setVelocity(0.07)
+            else:
+                motor.setVelocity(1)
+                
+            position_sensor = motor.getPositionSensor()
+            position_sensor.enable(timestep)
+            motors.append(motor)
+    
+    def rotate_y(x,y,z,theta):
+        new_x = x*np.cos(theta) + y*np.sin(theta)
+        new_z = z
+        new_y = y*-np.sin(theta) + x*np.cos(theta)
+        return [-new_x, new_y, new_z]
+    
+    def lookForTarget(recognized_objects):
+        if len(recognized_objects) > 0:
+    
+            for item in recognized_objects:
+                if "orange" in str(item.get_model()):
+                #if str(item.get_model()) in recognized_objects:
+    
+                    target = recognized_objects[0].get_position()
+                    dist = abs(target[2])
+    
+                    if dist < 5:
+                        return True
+    
+    def checkArmAtPosition(ikResults, cutoff=0.00005):
+        '''Checks if arm at position, given ikResults'''
+        
+        # Get the initial position of the motors
+        initial_position = [0,0,0,0] + [m.getPositionSensor().getValue() for m in motors] + [0,0,0,0]
+    
+        # Calculate the arm
+        arm_error = 0
+        for item in range(14):
+            arm_error += (initial_position[item] - ikResults[item])**2
+        arm_error = math.sqrt(arm_error)
+    
+        if arm_error < cutoff:
+            if vrb:
+                print("Arm at position.")
+            return True
+        return False
+    
+    def moveArmToTarget(ikResults):
+        '''Moves arm given ikResults'''
+        # Set the robot motors
+        for res in range(len(ikResults)):
+            if my_chain.links[res].name in part_names:
+                # This code was used to wait for the trunk, but now unnecessary.
+                # if abs(initial_position[2]-ikResults[2]) < 0.1 or res == 2:
+                robot.getDevice(my_chain.links[res].name).setPosition(ikResults[res])
+                if vrb:
+                    print("Setting {} to {}".format(my_chain.links[res].name, ikResults[res]))
+    
+    def calculateIk(offset_target,  orient=True, orientation_mode="Y", target_orientation=[0,0,1]):
+        '''
+        Parameters
+        ----------
+        offset_target : list
+            A vector specifying the target position of the end effector
+        orient : bool, optional
+            Whether or not to orient, default True
+        orientation_mode : str, optional
+            Either "X", "Y", or "Z", default "Y"
+        target_orientation : list, optional
+            The target orientation vector, default [0,0,1]
+        
+        Returns
+        -------
+        list
+            The calculated joint angles from inverse kinematics
+        '''
+        
+        # Get the number of links in the chain
+        num_links = len(my_chain.links)
+        
+        # Create initial position array with the correct size
+        initial_position = [0] * num_links
+        
+        # Map each motor to its corresponding link position
+        motor_idx = 0
+        for i in range(num_links):
+            link_name = my_chain.links[i].name
+            if link_name in part_names and link_name != "torso_lift_joint":
+                if motor_idx < len(motors):
+                    initial_position[i] = motors[motor_idx].getPositionSensor().getValue()
+                    motor_idx += 1
+        
+        # Calculate IK
+        ikResults = my_chain.inverse_kinematics(
+            offset_target, 
+            initial_position=initial_position,
+            target_orientation=target_orientation, 
+            orientation_mode=orientation_mode
+        )
+        
+        # Validate result
+        position = my_chain.forward_kinematics(ikResults)
+        squared_distance = math.sqrt(
+            (position[0, 3] - offset_target[0])**2 + 
+            (position[1, 3] - offset_target[1])**2 + 
+            (position[2, 3] - offset_target[2])**2
+        )
+        print(f"IK calculated with error - {squared_distance}")
+        
+        return ikResults
+
+    # Legacy code for visualizing
+        # import matplotlib.pyplot
+        # from mpl_toolkits.mplot3d import Axes3D
+        # ax = matplotlib.pyplot.figure().add_subplot(111, projection='3d')
+
+        # my_chain.plot(ikResults, ax, target=ikTarget)
+        # matplotlib.pyplot.show()
+            
+    def getTargetFromObject(recognized_objects):
+        ''' Gets a target vector from a list of recognized objects '''
+    
+        # Get the first valid target
+        target = recognized_objects[0].get_position()
+    
+        # Convert camera coordinates to IK/Robot coordinates
+        # offset_target = [-(target[2])+0.22, -target[0]+0.08, (target[1])+0.97+0.2]
+        offset_target = [-(target[2])+0.22, -target[0]+0.06, (target[1])+0.97+0.2]
+    
+        return offset_target
+    
+    def reachArm(target, previous_target, ikResults, cutoff=0.00005):
+        '''
+        This code is used to reach the arm over an object and pick it up.
+        '''
+    
+        # Calculate the error using the ikTarget
+        error = 0
+        ikTargetCopy = previous_target
+    
+        # Make sure ikTarget is defined
+        if previous_target is None:
+            error = 100
+        else:
+            for item in range(3):
+                error += (target[item] - previous_target[item])**2
+            error = math.sqrt(error)
+    
+        
+        # If error greater than margin
+        if error > 0.05:
+            print("Recalculating IK, error too high {}...".format(error))
+            ikResults = calculateIk(target)
+            ikTargetCopy = target
+            moveArmToTarget(ikResults)
+    
+        # Exit Condition
+        if checkArmAtPosition(ikResults, cutoff=cutoff):
+            if vrb:
+                print("NOW SWIPING")
+            return [True, ikTargetCopy, ikResults]
+        else:
+            if vrb:
+                print("ARM NOT AT POSITION")
+    
+        # Return ikResults
+        return [False, ikTargetCopy, ikResults]
+    
+    def closeGrip():
+        robot.getDevice("gripper_right_finger_joint").setPosition(0.0)
+        robot.getDevice("gripper_left_finger_joint").setPosition(0.0)
+    
+        # r_error = abs(robot.getDevice("gripper_right_finger_joint").getPositionSensor().getValue() - 0.01)
+        # l_error = abs(robot.getDevice("gripper_left_finger_joint").getPositionSensor().getValue() - 0.01)
+        
+        # print("ERRORS")
+        # print(r_error)
+        # print(l_error)
+    
+        # if r_error+l_error > 0.0001:
+        #     return False
+        # else:
+        #     return True
+    
+    def openGrip():
+        robot.getDevice("gripper_right_finger_joint").setPosition(0.045)
+        robot.getDevice("gripper_left_finger_joint").setPosition(0.045)
+    ## use path_planning to generate paths
+    ## do not change start_ws and end_ws below
+    start_ws = [(3.7, 5.7)]
+    end_ws = [(10.0, 9.3)]
+    pass
+
+
+debug=0
+while robot.step(timestep) != -1 and mode != 'planner':
+
+    ###################
+    #
+    # Mapping
+    #
+    ###################
+
+    ################ v [Begin] Do not modify v ##################
+    # Ground truth pose
+    pose_x = gps.getValues()[0]
+    pose_y = gps.getValues()[1]
+    
+    n = compass.getValues()
+    rad = -((math.atan2(n[0], n[2]))-1.5708)
+    pose_theta = rad
+    #print("X:",pose_x,"Y:",pose_y,"ROT",pose_theta)#
+
+    lidar_sensor_readings = lidar.getRangeImage()
+    lidar_sensor_readings = lidar_sensor_readings[83:len(lidar_sensor_readings)-83]
+
+    for i, rho in enumerate(lidar_sensor_readings):
+        alpha = lidar_offsets[i]
+
+        if rho > LIDAR_SENSOR_MAX_RANGE:
+            continue
+
+        # The Webots coordinate system doesn't match the robot-centric axes we're used to
+        rx = math.cos(alpha)*rho
+        ry = -math.sin(alpha)*rho
+
+        t = pose_theta + np.pi/2.
+        # Convert detection from robot coordinates into world coordinates
+        wx =  math.cos(t)*rx - math.sin(t)*ry + pose_x
+        wy =  math.sin(t)*rx + math.cos(t)*ry + pose_y
+
+        ################ ^ [End] Do not modify ^ ##################
+
+        #print("Rho: %f Alpha: %f rx: %f ry: %f wx: %f wy: %f" % (rho,alpha,rx,ry,wx,wy))
+        if wx >= 12:
+            wx = 11.999
+        if wy >= 12:
+            wy = 11.999
+        if rho < LIDAR_SENSOR_MAX_RANGE:
+            # Part 1.3: visualize map gray values.
+            coordX=360-abs(int(wx*30))
+            coordY=abs(int(wy*30))
+            if coordX<360 and coordY<360:
+                map[coordX][coordY]=min(1,map[coordX][coordY]+inc)
+                g=map[coordX][coordY]
+                #color=int((g*256**2+g*256+g)*255)
+                shade=int(g*255)
+                color=(shade<<16)|(shade<<8)|shade# I think this is what you meant to do
+                display.setColor(color)
+                display.drawPixel(coordX,coordY)
+
+    # Draw the robot's current pose on the 360x360 display
+    display.setColor(int(0xFF0000))
+    display.drawPixel(360-abs(int(pose_x*30)), abs(int(pose_y*30)))
+    threshold_map=map>0.5
+    
+
+    ###################
+    #
+    # Controller
+    #
+    ###################
+    if mode == 'manual':
+        key = keyboard.getKey()
+        while(keyboard.getKey() != -1): pass
+        if key == keyboard.LEFT :
+            vL = -MAX_SPEED
+            vR = MAX_SPEED
+        elif key == keyboard.RIGHT:
+            vL = MAX_SPEED
+            vR = -MAX_SPEED
+        elif key == keyboard.UP:
+            vL = MAX_SPEED
+            vR = MAX_SPEED
+        elif key == keyboard.DOWN:
+            vL = -MAX_SPEED
+            vR = -MAX_SPEED
+        elif key == ord(' '):
+            vL = 0
+            vR = 0
+        elif key == ord('S'):
+            # Part 1.4: Filter map and save to filesystem
+            # new_map = map>.5
+            # new_map = np.multiply(new_map, 1)
+            new_map = (map > 0.5).astype(int)
+
+            np.save('map.npy', new_map) 
+            
+            print("Map file saved")
+        elif key == ord('L'):
+            # You will not use this portion in Part 1 but here's an example for loading saved a numpy array
+            map = np.load("map.npy")
+            plt.imshow(map, cmap='gray')
+            plt.show()
+            
+            print("Map loaded")
+        else: # slow down
+            vL *= 0.75
+            vR *= 0.75
+    elif mode == 'autonomous': # not manual mode
+        #print(pose_x,pose_x-0.25*math.cos(pose_theta),pose_x-0.25*math.cos(pose_theta+math.pi/2),pose_x-0.25*math.cos(pose_theta+math.pi),pose_x-0.25*math.cos(pose_theta+math.pi*3/2))
+        #print(pose_y,pose_y-0.25*math.cos(pose_theta),pose_y-0.25*math.cos(pose_theta+math.pi/2),pose_y-0.25*math.cos(pose_theta+math.pi),pose_y-0.25*math.cos(pose_theta+math.pi*3/2))
+        
+        #centering GPS (why is it not centered already?????)
+        pose_x-=0.25*math.cos(pose_theta+math.pi/2)
+        pose_y-=0.25*math.cos(pose_theta)
+        pose_theta+=math.pi/2
+        
+        if index<len(waypoints):
+            #waypoints[index][0]=--5.06283#DEBUG TEST
+            #waypoints[index][1]=-4.83086#DEBUG TEST
+        
+            dist=((pose_x-waypoints[index][0])**2+(pose_y-waypoints[index][1])**2)**.5
+            bear=math.atan2(waypoints[index][1]-pose_y,waypoints[index][0]-pose_x)-pose_theta
+            print("goal:",waypoints[index][0],waypoints[index][1])#
+            print("  xy:",pose_x,pose_y,pose_theta)
+            while bear>math.pi:
+                bear-=2*math.pi
+            while bear<-math.pi:
+                bear+=2*math.pi
+            print("\tbear:",bear,"dist:",dist)#
+            #bear will be heading when dist~=0
+            turn_scalar=3#d/r
+            forward_scalar=4
+            rot_threshold=0.015
+            dist_threshold=0.5
+            if dist<=dist_threshold:
+                index+=5
+            elif abs(bear)>rot_threshold:
+                vL=-bear*turn_scalar
+                vR=bear*turn_scalar
+                print("left" if vL<0 else "right")#
+            elif dist>dist_threshold:
+                vL=dist*forward_scalar
+                vR=dist*forward_scalar
+                print("forward")#
+            vL=min(vL,MAX_SPEED/4)
+            vL=max(vL,-MAX_SPEED/4)
+            vR=min(vR,MAX_SPEED/4)
+            vR=max(vR,-MAX_SPEED/4)
+            #print(f"waypoint[{index}]:",waypoints[index],"vL:",vL,"vR:",vR)#
+        else:
+            vL=0
+            vR=0
+            print("done")
+            STATE=None
+
+        # Part 3.2: Feedback controller
+        #STEP 1: Calculate the error
+        #rho = 0
+        #alpha = 0
+
+        #STEP 2: Controller
+        #dX = 0
+        #dTheta = 0
+
+        #STEP 3: Compute wheelspeeds
+        #vL = 0
+        #vR = 0
+
+        # Normalize wheelspeed
+        # (Keep the wheel speeds a bit less than the actual platform MAX_SPEED to minimize jerk)
+    elif mode=='picknplace':
+        if debug==0:
+            (vL,vR)=(1,1)
+            #robot.step(2000)
+            debug=1
+        #(vL,vR)=(1,1)
+        print("debug",debug)#
+        #if lookForTarget(["orange"]):
+        #    (vL,vR)=(0,0)
+        openGrip()
+        orange=[-8.40456,-6.08132,1.11976]
+        try:
+            data=calculateIk(orange)
+            print(data)
+            (vL,vR)=(0,0)
+        except ValueError as err:
+            print("their method had a whoopsie again :(")
+            print("\t",err)
+
+
+    # Odometry code. Don't change vL or vR speeds after this line.
+    # We are using GPS and compass for this lab to get a better pose but this is how you'll do the odometry
+    #pose_x += (vL+vR)/2/MAX_SPEED*MAX_SPEED_MS*timestep/1000.0*math.cos(pose_theta)
+    #pose_y -= (vL+vR)/2/MAX_SPEED*MAX_SPEED_MS*timestep/1000.0*math.sin(pose_theta)
+    #pose_theta += (vR-vL)/AXLE_LENGTH/MAX_SPEED*MAX_SPEED_MS*timestep/1000.0
+
+    # print("X: %f Z: %f Theta: %f" % (pose_x, pose_y, pose_theta))
+
+    # Actuator commands
+    print("vL",vL,"vR",vR)
+    robot_parts[MOTOR_LEFT].setVelocity(vL)
+    robot_parts[MOTOR_RIGHT].setVelocity(vR)
+    
+while robot.step(timestep) != -1:
+    # there is a bug where webots have to be restarted if the controller exits on Windows
+    # this is to keep the controller running
+    pass
